@@ -1,0 +1,516 @@
+import 'dart:io';
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; 
+import 'package:path/path.dart' as p; 
+import 'package:file_picker/file_picker.dart'; 
+import 'package:open_filex/open_filex.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+void main() => runApp(const ImageOrganizerApp());
+
+class ImageOrganizerApp extends StatelessWidget {
+  const ImageOrganizerApp({super.key});
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+        title: 'Image Organizer Pro',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData.dark(useMaterial3: true),
+        home: const ImageRenameScreen(),
+      );
+}
+
+class ImageRenameScreen extends StatefulWidget {
+  const ImageRenameScreen({super.key});
+  @override
+  State<ImageRenameScreen> createState() => _ImageRenameScreenState();
+}
+
+class _ImageRenameScreenState extends State<ImageRenameScreen> {
+  List<File> _allFiles = [];
+  int _currentIndex = 0;
+  int _pageSize = 12; 
+  String _sourcePath = "";
+  String _targetPath = ""; 
+  String _editorPath = ""; 
+  final Set<String> _selectedPaths = {}; 
+  final Set<String> _markedForSave = {}; 
+  final Map<String, TextEditingController> _controllers = {};
+  final List<String> _validExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.bmp'];
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStoredPreferences();
+  }
+
+  Future<void> _loadStoredPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<int> allowedSizes = [12, 24, 48, 100];
+    setState(() {
+      _sourcePath = prefs.getString('sourcePath') ?? "";
+      _targetPath = prefs.getString('targetPath') ?? "";
+      _editorPath = prefs.getString('editorPath') ?? "";
+      int savedSize = prefs.getInt('pageSize') ?? 12;
+      _pageSize = allowedSizes.contains(savedSize) ? savedSize : 12;
+    });
+    if (_sourcePath.isNotEmpty) _loadFiles();
+  }
+
+  Future<void> _savePreference(String key, dynamic value) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (value is String) await prefs.setString(key, value);
+    if (value is int) await prefs.setInt(key, value);
+  }
+
+  Future<void> _selectSourceDirectory() async {
+    String? path = await FilePicker.platform.getDirectoryPath();
+    if (path != null) {
+      setState(() {
+        _sourcePath = path;
+        _currentIndex = 0;
+        _selectedPaths.clear();
+        _markedForSave.clear();
+      });
+      _savePreference('sourcePath', path);
+      _loadFiles();
+    }
+  }
+
+  Future<void> _selectTargetDirectory() async {
+    String? path = await FilePicker.platform.getDirectoryPath();
+    if (path != null) {
+      setState(() => _targetPath = path);
+      _savePreference('targetPath', path);
+    }
+  }
+
+  Future<void> _selectEditorApp() async {
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.custom, 
+      allowedExtensions: ['exe']
+    );
+    if (result != null && result.files.single.path != null) {
+      setState(() => _editorPath = result.files.single.path!);
+      _savePreference('editorPath', _editorPath);
+    }
+  }
+
+  void _loadFiles() {
+    if (_sourcePath.isEmpty) return;
+    final dir = Directory(_sourcePath);
+    if (dir.existsSync()) {
+      PaintingBinding.instance.imageCache.clear();
+      PaintingBinding.instance.imageCache.clearLiveImages();
+      double currentOffset = _scrollController.hasClients ? _scrollController.offset : 0.0;
+
+      setState(() {
+        _controllers.forEach((k, v) => v.dispose());
+        _controllers.clear();
+        _allFiles = dir
+            .listSync()
+            .whereType<File>()
+            .where((f) => _validExtensions.contains(p.extension(f.path).toLowerCase()))
+            .toList();
+        _allFiles.sort((a, b) => p.basename(a.path).compareTo(p.basename(b.path)));
+      });
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) _scrollController.jumpTo(currentOffset);
+      });
+    }
+  }
+
+  void _openImage(String filePath) {
+    if (_editorPath.isNotEmpty && File(_editorPath).existsSync()) {
+      Process.run(_editorPath, [filePath]);
+    } else {
+      OpenFilex.open(filePath);
+    }
+  }
+
+  Future<void> _processMarkedFiles() async {
+    if (_targetPath.isEmpty) return;
+    for (String path in _markedForSave) {
+      File(path).copySync(p.join(_targetPath, p.basename(path)));
+    }
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Copied ${_markedForSave.length} images.")));
+    setState(() => _markedForSave.clear());
+  }
+
+  void _renameFile(File file, String newName) {
+    if (newName.isEmpty) return;
+    String newPath = p.join(p.dirname(file.path), "$newName${p.extension(file.path)}");
+    try {
+      File newFile = file.renameSync(newPath);
+      setState(() {
+        int index = _allFiles.indexOf(file);
+        if (index != -1) _allFiles[index] = newFile;
+        final oldController = _controllers.remove(file.path);
+        _controllers[newPath] = oldController ?? TextEditingController();
+      });
+    } catch (e) {
+      debugPrint("Rename failed: $e");
+    }
+  }
+
+  void _startSlideshow() {
+    if (_allFiles.isEmpty) return;
+
+    List<File> playlist = _selectedPaths.isNotEmpty
+        ? _allFiles.where((f) => _selectedPaths.contains(f.path)).toList()
+        : _allFiles;
+
+    int seconds = 3; 
+    bool shuffle = false;
+
+    showDialog(
+      context: context,
+      builder: (c) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text("Slideshow Settings"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  const Text("Seconds per image: "),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    width: 60,
+                    child: TextFormField(
+                      initialValue: "3",
+                      keyboardType: TextInputType.number,
+                      onChanged: (v) => seconds = int.tryParse(v) ?? 3,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 15),
+              Row(
+                children: [
+                  const Text("Display randomly (Shuffle): "),
+                  Checkbox(
+                    value: shuffle,
+                    activeColor: Colors.greenAccent.shade700,
+                    onChanged: (val) {
+                      setDialogState(() => shuffle = val ?? false);
+                    },
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c), child: const Text("Cancel")),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(c);
+                
+                List<File> finalPlaylist = List<File>.from(playlist);
+                if (shuffle) {
+                  finalPlaylist.shuffle();
+                }
+
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => FullscreenSlideshowWidget(
+                      images: finalPlaylist, 
+                      intervalSeconds: seconds
+                    ),
+                  ),
+                );
+              },
+              child: const Text("Start"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showBatchRenameDialog() {
+    String prefix = "";
+    showDialog(context: context, builder: (c) => AlertDialog(
+      title: const Text("Batch Rename"), 
+      content: TextField(autofocus: true, onChanged: (v) => prefix = v, decoration: const InputDecoration(hintText: "Prefix_")), 
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c), child: const Text("Cancel")), 
+        ElevatedButton(onPressed: () {
+          if (prefix.isEmpty) return;
+          int nextNum = 1;
+          final regex = RegExp('^${RegExp.escape(prefix)}(\\d+)\\.');
+          for (var f in _allFiles) {
+            final match = regex.firstMatch(p.basename(f.path));
+            if (match != null) {
+              int n = int.tryParse(match.group(1) ?? "0") ?? 0;
+              if (n >= nextNum) nextNum = n + 1;
+            }
+          }
+          List<File> targets = _selectedPaths.isNotEmpty 
+              ? _allFiles.where((f) => _selectedPaths.contains(f.path)).toList() 
+              : _allFiles.skip(_currentIndex).take(_pageSize).toList();
+          for (int i = 0; i < targets.length; i++) {
+            targets[i].renameSync(p.join(p.dirname(targets[i].path), "$prefix${nextNum + i}${p.extension(targets[i].path)}"));
+          }
+          _selectedPaths.clear(); _loadFiles(); Navigator.pop(c);
+        }, child: const Text("Rename"))
+      ]));
+  }
+
+  void _deleteBulk() {
+    if (_selectedPaths.isEmpty) return;
+    final List<String> pathsToDelete = List<String>.from(_selectedPaths);
+
+    try {
+      for (var path in pathsToDelete) {
+        final f = File(path);
+        if (f.existsSync()) {
+          try {
+            f.deleteSync();
+          } catch (e) {
+            debugPrint("Failed to delete $path: $e");
+          }
+        }
+      }
+    } finally {
+      setState(() {
+        _selectedPaths.clear();
+        _markedForSave.clear();
+      });
+      _loadFiles();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    var displayed = _allFiles.skip(_currentIndex).take(_pageSize).toList();
+    double cardWidth = (MediaQuery.of(context).size.width - 48) / 4;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_sourcePath.isEmpty ? "Image Organizer" : "Source: ${p.basename(_sourcePath)}"),
+        bottom: PreferredSize(preferredSize: const Size.fromHeight(50), child: _buildSubHeader()),
+        actions: [
+          if (_allFiles.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.play_circle_outline, color: Colors.greenAccent), 
+              onPressed: _startSlideshow,
+              tooltip: "Play Slideshow",
+            ),
+          IconButton(icon: const Icon(Icons.folder_open), onPressed: _selectSourceDirectory, tooltip: "Select Source Folder"),
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _loadFiles, tooltip: "Refresh Grid"),
+        ],
+      ),
+      body: _sourcePath.isEmpty
+          ? Center(child: ElevatedButton.icon(onPressed: _selectSourceDirectory, icon: const Icon(Icons.folder_open), label: const Text("Select Source Folder")))
+          : SingleChildScrollView( 
+              controller: _scrollController,
+              padding: const EdgeInsets.all(8),
+              child: Wrap(
+                spacing: 8, runSpacing: 8,
+                children: displayed.map((file) => _buildImageCard(file, cardWidth)).toList(),
+              ),
+            ),
+      bottomNavigationBar: _buildBottomBar(),
+    );
+  }
+
+  Widget _buildSubHeader() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          Text(_targetPath.isEmpty ? "Target not set" : "Target: ${p.basename(_targetPath)}", style: const TextStyle(color: Colors.cyan, fontSize: 11)),
+          const SizedBox(width: 8),
+          TextButton.icon(onPressed: _selectTargetDirectory, icon: const Icon(Icons.folder_shared, size: 14), label: const Text("Set Target", style: TextStyle(fontSize: 11))),
+          const SizedBox(
+            height: 16, 
+            child: VerticalDivider(width: 16, indent: 4, endIndent: 4)
+          ),
+          Text(_editorPath.isEmpty ? "Default Editor" : "Editor: ${p.basename(_editorPath)}", style: const TextStyle(color: Colors.amber, fontSize: 11)),
+          const SizedBox(width: 8),
+          TextButton.icon(onPressed: _selectEditorApp, icon: const Icon(Icons.edit_note, size: 14), label: const Text("Set Editor", style: TextStyle(fontSize: 11))),
+          const Spacer(),
+          if (_markedForSave.isNotEmpty)
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.cyan.shade900),
+              onPressed: _processMarkedFiles,
+              icon: const Icon(Icons.send_and_archive, size: 16),
+              label: Text("Save Marked (${_markedForSave.length})"),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildImageCard(File file, double width) {
+    bool isSelected = _selectedPaths.contains(file.path);
+    bool isMarked = _markedForSave.contains(file.path);
+    _controllers.putIfAbsent(file.path, () => TextEditingController());
+
+    return SizedBox(
+      width: width,
+      child: Card(
+        margin: EdgeInsets.zero,
+        color: isSelected ? Colors.blueGrey.shade800 : null,
+        shape: isSelected ? RoundedRectangleBorder(side: const BorderSide(color: Colors.blue, width: 2), borderRadius: BorderRadius.circular(8)) : null,
+        child: Column(
+          mainAxisSize: MainAxisSize.min, 
+          children: [
+            Stack(
+              children: [
+                InkWell(
+                  onTap: () => setState(() => isSelected ? _selectedPaths.remove(file.path) : _selectedPaths.add(file.path)),
+                  child: Image.file(file, fit: BoxFit.contain, key: ValueKey("${file.path}_${file.lastModifiedSync()}")), 
+                ),
+                Positioned(
+                  top: 0, left: 0,
+                  child: Checkbox(
+                    value: isMarked, activeColor: Colors.cyan,
+                    onChanged: (val) => setState(() => val! ? _markedForSave.add(file.path) : _markedForSave.remove(file.path)),
+                  ),
+                ),
+                if (isSelected) const Positioned(top: 8, right: 8, child: Icon(Icons.check_circle, color: Colors.blue, size: 20)),
+              ],
+            ),
+            Padding(padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 4), child: Text(p.basename(file.path), style: const TextStyle(fontSize: 9), overflow: TextOverflow.ellipsis)),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: TextField(
+                controller: _controllers[file.path], 
+                style: const TextStyle(fontSize: 11),
+                decoration: const InputDecoration(isDense: true, hintText: "Rename...", contentPadding: EdgeInsets.symmetric(vertical: 6)),
+                onSubmitted: (v) => _renameFile(file, v),
+              ),
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly, 
+              children: [
+                IconButton(icon: const Icon(Icons.check, size: 14, color: Colors.green), onPressed: () => _renameFile(file, _controllers[file.path]!.text)),
+                IconButton(icon: const Icon(Icons.info_outline, size: 14, color: Colors.amber), onPressed: () {
+                  final stats = file.statSync();
+                  showDialog(context: context, builder: (c) => AlertDialog(title: const Text("Info"), content: Text("Size: ${(stats.size/1024).toStringAsFixed(2)} KB\nModified: ${stats.modified}"), actions: [TextButton(onPressed: ()=>Navigator.pop(c), child: const Text("Close"))]));
+                }),
+                IconButton(icon: const Icon(Icons.open_in_new, size: 14, color: Colors.blue), onPressed: () => _openImage(file.path)),
+                IconButton(icon: const Icon(Icons.delete_outline, size: 14, color: Colors.redAccent), onPressed: () { file.deleteSync(); _loadFiles(); }),
+              ],
+            )
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomBar() {
+    if (_sourcePath.isEmpty) return const SizedBox.shrink();
+
+    int currentPage = (_currentIndex / _pageSize).floor() + 1;
+    int totalPages = (_allFiles.length / _pageSize).ceil();
+    if (totalPages < 1) totalPages = 1; 
+
+    return Container(
+      padding: const EdgeInsets.all(8), color: Colors.black26,
+      child: Row(
+        children: [
+          Text("${_selectedPaths.length} sel / ${_allFiles.length} tot", style: const TextStyle(fontSize: 11)),
+          const SizedBox(
+            height: 16, 
+            child: VerticalDivider(width: 16, indent: 4, endIndent: 4)
+          ),
+          Text("Page $currentPage of $totalPages", style: const TextStyle(fontSize: 11, color: Colors.grey)),
+          const SizedBox(width: 12),
+          const Text("View:", style: TextStyle(fontSize: 11)),
+          const SizedBox(width: 4),
+          DropdownButton<int>(
+            value: _pageSize,
+            items: [12, 24, 48, 100].map((v) => DropdownMenuItem(value: v, child: Text(v.toString(), style: const TextStyle(fontSize: 11)))).toList(),
+            onChanged: (val) {
+              setState(() { _pageSize = val!; _currentIndex = 0; });
+              final dynamic outVal = val;
+              SharedPreferences.getInstance().then((p) => p.setInt('pageSize', outVal));
+              _loadFiles();
+            },
+          ),
+          const Spacer(),
+          ElevatedButton(onPressed: _currentIndex > 0 ? () => setState(() { _currentIndex -= _pageSize; _scrollController.jumpTo(0); }) : null, child: const Text("<")),
+          const SizedBox(width: 4),
+          ElevatedButton(onPressed: _currentIndex + _pageSize < _allFiles.length ? () => setState(() { _currentIndex += _pageSize; _scrollController.jumpTo(0); }) : null, child: const Text(">")),
+          const SizedBox(width: 8),
+          if (_selectedPaths.isNotEmpty)
+            OutlinedButton(onPressed: _deleteBulk, child: const Text("Del Sel", style: TextStyle(color: Colors.redAccent, fontSize: 11))),
+          const SizedBox(width: 8),
+          OutlinedButton(onPressed: _allFiles.isNotEmpty ? _showBatchRenameDialog : null, child: const Text("Batch Rename", style: TextStyle(fontSize: 11))),
+        ],
+      ),
+    );
+  }
+}
+
+class FullscreenSlideshowWidget extends StatefulWidget {
+  final List<File> images;
+  final int intervalSeconds;
+
+  const FullscreenSlideshowWidget({
+    super.key, 
+    required this.images, 
+    required this.intervalSeconds
+  });
+
+  @override
+  State<FullscreenSlideshowWidget> createState() => _FullscreenSlideshowWidgetState();
+}
+
+class _FullscreenSlideshowWidgetState extends State<FullscreenSlideshowWidget> {
+  int _index = 0;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _startTimer();
+  }
+
+  void _startTimer() {
+    _timer = Timer.periodic(Duration(seconds: widget.intervalSeconds), (timer) {
+      if (mounted) {
+        setState(() {
+          _index = (_index + 1) % widget.images.length;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel(); 
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return KeyboardListener(
+      focusNode: FocusNode()..requestFocus(), 
+      onKeyEvent: (KeyEvent event) {
+        if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.escape) {
+          Navigator.pop(context);
+        }
+      },
+      child: GestureDetector(
+        onTapDown: (_) => Navigator.pop(context), 
+        child: Scaffold(
+          backgroundColor: Colors.black,
+          body: SizedBox.expand(
+            child: Image.file(
+              widget.images[_index],
+              fit: BoxFit.contain,
+              key: ValueKey(widget.images[_index].path),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
