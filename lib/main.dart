@@ -13,7 +13,7 @@ class ImageOrganizerApp extends StatelessWidget {
   const ImageOrganizerApp({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
-        title: 'Image Organizer Pro',
+        title: 'Media Organizer Pro',
         debugShowCheckedModeBanner: false,
         theme: ThemeData.dark(useMaterial3: true),
         home: const ImageRenameScreen(),
@@ -36,7 +36,11 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
   final Set<String> _selectedPaths = {}; 
   final Set<String> _markedForSave = {}; 
   final Map<String, TextEditingController> _controllers = {};
-  final List<String> _validExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.bmp'];
+  
+  // Expanded to support common video extensions alongside images
+  final List<String> _imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.bmp'];
+  final List<String> _videoExtensions = ['.mp4', '.mov', '.avi', '.mkv'];
+  
   final ScrollController _scrollController = ScrollController();
 
   @override
@@ -108,10 +112,14 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
       setState(() {
         _controllers.forEach((k, v) => v.dispose());
         _controllers.clear();
+        
+        // Combines both valid image and video lists for standard discovery
+        final validExtensions = [..._imageExtensions, ..._videoExtensions];
+        
         _allFiles = dir
             .listSync()
             .whereType<File>()
-            .where((f) => _validExtensions.contains(p.extension(f.path).toLowerCase()))
+            .where((f) => validExtensions.contains(p.extension(f.path).toLowerCase()))
             .toList();
         _allFiles.sort((a, b) => p.basename(a.path).compareTo(p.basename(b.path)));
       });
@@ -122,7 +130,7 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
     }
   }
 
-  void _openImage(String filePath) {
+  void _openMedia(String filePath) {
     if (_editorPath.isNotEmpty && File(_editorPath).existsSync()) {
       Process.run(_editorPath, [filePath]);
     } else {
@@ -135,7 +143,7 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
     for (String path in _markedForSave) {
       File(path).copySync(p.join(_targetPath, p.basename(path)));
     }
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Copied ${_markedForSave.length} images.")));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Copied ${_markedForSave.length} items.")));
     setState(() => _markedForSave.clear());
   }
 
@@ -149,6 +157,7 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
         if (index != -1) _allFiles[index] = newFile;
         final oldController = _controllers.remove(file.path);
         _controllers[newPath] = oldController ?? TextEditingController();
+        _controllers[newPath]?.clear();
       });
     } catch (e) {
       debugPrint("Rename failed: $e");
@@ -158,9 +167,15 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
   void _startSlideshow() {
     if (_allFiles.isEmpty) return;
 
-    List<File> playlist = _selectedPaths.isNotEmpty
+    // Filters out videos for the slideshow since it uses regular image rendering primitives
+    List<File> playlist = (_selectedPaths.isNotEmpty
         ? _allFiles.where((f) => _selectedPaths.contains(f.path)).toList()
-        : _allFiles;
+        : _allFiles).where((f) => _imageExtensions.contains(p.extension(f.path).toLowerCase())).toList();
+
+    if (playlist.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("No images selected for slideshow.")));
+      return;
+    }
 
     int seconds = 3; 
     bool shuffle = false;
@@ -291,14 +306,14 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_sourcePath.isEmpty ? "Image Organizer" : "Source: ${p.basename(_sourcePath)}"),
+        title: Text(_sourcePath.isEmpty ? "Media Organizer" : "Source: ${p.basename(_sourcePath)}"),
         bottom: PreferredSize(preferredSize: const Size.fromHeight(50), child: _buildSubHeader()),
         actions: [
           if (_allFiles.isNotEmpty)
             IconButton(
               icon: const Icon(Icons.play_circle_outline, color: Colors.greenAccent), 
               onPressed: _startSlideshow,
-              tooltip: "Play Slideshow",
+              tooltip: "Play Image Slideshow",
             ),
           IconButton(icon: const Icon(Icons.folder_open), onPressed: _selectSourceDirectory, tooltip: "Select Source Folder"),
           IconButton(icon: const Icon(Icons.refresh), onPressed: _loadFiles, tooltip: "Refresh Grid"),
@@ -311,7 +326,7 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
               padding: const EdgeInsets.all(8),
               child: Wrap(
                 spacing: 8, runSpacing: 8,
-                children: displayed.map((file) => _buildImageCard(file, cardWidth)).toList(),
+                children: displayed.map((file) => _buildMediaCard(file, cardWidth)).toList(),
               ),
             ),
       bottomNavigationBar: _buildBottomBar(),
@@ -326,13 +341,10 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
           Text(_targetPath.isEmpty ? "Target not set" : "Target: ${p.basename(_targetPath)}", style: const TextStyle(color: Colors.cyan, fontSize: 11)),
           const SizedBox(width: 8),
           TextButton.icon(onPressed: _selectTargetDirectory, icon: const Icon(Icons.folder_shared, size: 14), label: const Text("Set Target", style: TextStyle(fontSize: 11))),
-          const SizedBox(
-            height: 16, 
-            child: VerticalDivider(width: 16, indent: 4, endIndent: 4)
-          ),
-          Text(_editorPath.isEmpty ? "Default Editor" : "Editor: ${p.basename(_editorPath)}", style: const TextStyle(color: Colors.amber, fontSize: 11)),
+          const VerticalDivider(width: 20),
+          Text(_editorPath.isEmpty ? "Default Player" : "Player: ${p.basename(_editorPath)}", style: const TextStyle(color: Colors.amber, fontSize: 11)),
           const SizedBox(width: 8),
-          TextButton.icon(onPressed: _selectEditorApp, icon: const Icon(Icons.edit_note, size: 14), label: const Text("Set Editor", style: TextStyle(fontSize: 11))),
+          TextButton.icon(onPressed: _selectEditorApp, icon: const Icon(Icons.edit_note, size: 14), label: const Text("Set Player App", style: TextStyle(fontSize: 11))),
           const Spacer(),
           if (_markedForSave.isNotEmpty)
             ElevatedButton.icon(
@@ -346,9 +358,10 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
     );
   }
 
-  Widget _buildImageCard(File file, double width) {
+  Widget _buildMediaCard(File file, double width) {
     bool isSelected = _selectedPaths.contains(file.path);
     bool isMarked = _markedForSave.contains(file.path);
+    bool isVideo = _videoExtensions.contains(p.extension(file.path).toLowerCase());
     _controllers.putIfAbsent(file.path, () => TextEditingController());
 
     return SizedBox(
@@ -362,9 +375,18 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
           children: [
             Stack(
               children: [
-                InkWell(
-                  onTap: () => setState(() => isSelected ? _selectedPaths.remove(file.path) : _selectedPaths.add(file.path)),
-                  child: Image.file(file, fit: BoxFit.contain, key: ValueKey("${file.path}_${file.lastModifiedSync()}")), 
+                Container(
+                  height: width * 0.65, // Enforces standard layout constraints
+                  color: Colors.black12,
+                  child: Center(
+                    child: InkWell(
+                      onTap: () => setState(() => isSelected ? _selectedPaths.remove(file.path) : _selectedPaths.add(file.path)),
+                      // Route rendering dynamically depending on file type signature
+                      child: isVideo 
+                          ? EmbeddedVideoThumbnail(videoFile: file)
+                          : Image.file(file, fit: BoxFit.contain, key: ValueKey("${file.path}_${file.lastModifiedSync()}")), 
+                    ),
+                  ),
                 ),
                 Positioned(
                   top: 0, left: 0,
@@ -374,6 +396,7 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
                   ),
                 ),
                 if (isSelected) const Positioned(top: 8, right: 8, child: Icon(Icons.check_circle, color: Colors.blue, size: 20)),
+                if (isVideo) const Positioned(bottom: 8, right: 8, child: Icon(Icons.videocam, color: Colors.amberAccent, size: 20)),
               ],
             ),
             Padding(padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 4), child: Text(p.basename(file.path), style: const TextStyle(fontSize: 9), overflow: TextOverflow.ellipsis)),
@@ -392,9 +415,9 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
                 IconButton(icon: const Icon(Icons.check, size: 14, color: Colors.green), onPressed: () => _renameFile(file, _controllers[file.path]!.text)),
                 IconButton(icon: const Icon(Icons.info_outline, size: 14, color: Colors.amber), onPressed: () {
                   final stats = file.statSync();
-                  showDialog(context: context, builder: (c) => AlertDialog(title: const Text("Info"), content: Text("Size: ${(stats.size/1024).toStringAsFixed(2)} KB\nModified: ${stats.modified}"), actions: [TextButton(onPressed: ()=>Navigator.pop(c), child: const Text("Close"))]));
+                  showDialog(context: context, builder: (c) => AlertDialog(title: const Text("Info"), content: Text("Size: ${(stats.size / (1024 * 1024)).toStringAsFixed(2)} MB\nModified: ${stats.modified}"), actions: [TextButton(onPressed: ()=>Navigator.pop(c), child: const Text("Close"))]));
                 }),
-                IconButton(icon: const Icon(Icons.open_in_new, size: 14, color: Colors.blue), onPressed: () => _openImage(file.path)),
+                if (isVideo) IconButton(icon: const Icon(Icons.play_arrow, size: 14, color: Colors.blue), onPressed: () => _openMedia(file.path)) else IconButton(icon: const Icon(Icons.open_in_new, size: 14, color: Colors.blue), onPressed: () => _openMedia(file.path)),
                 IconButton(icon: const Icon(Icons.delete_outline, size: 14, color: Colors.redAccent), onPressed: () { file.deleteSync(); _loadFiles(); }),
               ],
             )
@@ -417,8 +440,8 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
         children: [
           Text("${_selectedPaths.length} sel / ${_allFiles.length} tot", style: const TextStyle(fontSize: 11)),
           const SizedBox(
-            height: 16, 
-            child: VerticalDivider(width: 16, indent: 4, endIndent: 4)
+            height: 16,
+            child: VerticalDivider(width: 16, indent: 4, endIndent: 4),
           ),
           Text("Page $currentPage of $totalPages", style: const TextStyle(fontSize: 11, color: Colors.grey)),
           const SizedBox(width: 12),
@@ -444,6 +467,29 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
           const SizedBox(width: 8),
           OutlinedButton(onPressed: _allFiles.isNotEmpty ? _showBatchRenameDialog : null, child: const Text("Batch Rename", style: TextStyle(fontSize: 11))),
         ],
+      ),
+    );
+  }
+}
+
+// BULLETPROOF WIDGET: Simple video thumbnail placeholder
+class EmbeddedVideoThumbnail extends StatelessWidget {
+  final File videoFile;
+  const EmbeddedVideoThumbnail({super.key, required this.videoFile});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox.expand(
+      child: Container(
+        color: Colors.black45,
+        child: const Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.play_circle_outline, size: 40, color: Colors.amberAccent),
+            SizedBox(height: 4),
+            Text("Video", style: TextStyle(fontSize: 10, color: Colors.grey)),
+          ],
+        ),
       ),
     );
   }
