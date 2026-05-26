@@ -6,8 +6,15 @@ import 'package:path/path.dart' as p;
 import 'package:file_picker/file_picker.dart'; 
 import 'package:open_filex/open_filex.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:video_player/video_player.dart';
+import 'package:video_player_win/video_player_win_plugin.dart';
 
-void main() => runApp(const ImageOrganizerApp());
+void main() {
+  if (Platform.isWindows) {
+    WindowsVideoPlayer.registerWith();
+  }
+  runApp(const ImageOrganizerApp());
+}
 
 class ImageOrganizerApp extends StatelessWidget {
   const ImageOrganizerApp({super.key});
@@ -284,7 +291,7 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
         final f = File(path);
         if (f.existsSync()) {
           try {
-            f.deleteSync();
+            _moveToRecycleBin(path);
           } catch (e) {
             debugPrint("Failed to delete $path: $e");
           }
@@ -297,6 +304,96 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
       });
       _loadFiles();
     }
+  }
+
+  void _moveToRecycleBin(String path) {
+    if (Platform.isWindows) {
+      Process.runSync(
+        'powershell',
+        [
+          '-command',
+          r'Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($env:FILE_PATH, "OnlyErrorDialogs", "SendToRecycleBin")'
+        ],
+        // Passing the path as an environment variable prevents issues with spaces or quotes in file names
+        environment: {'FILE_PATH': path},
+      );
+    } else if (Platform.isMacOS) {
+      // Uses macOS AppleScript to ask Finder to send the file to the Trash
+      Process.runSync('osascript', ['-e', 'tell application "Finder" to delete POSIX file "$path"']);
+    } else if (Platform.isLinux) {
+      // Uses the standard GNOME/Linux gio command to move the file to the Trash
+      Process.runSync('gio', ['trash', path]);
+    } else {
+      File(path).deleteSync();
+    }
+  }
+
+  void _showZoomDialog(File initialFile) {
+    // Get all valid images in the current folder
+    List<File> imageFiles = _allFiles.where((f) => _imageExtensions.contains(p.extension(f.path).toLowerCase())).toList();
+    int currentIndex = imageFiles.indexOf(initialFile);
+    if (currentIndex == -1) currentIndex = 0; 
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return Dialog(
+            backgroundColor: Colors.black,
+            insetPadding: const EdgeInsets.all(24),
+            child: Stack(
+              children: [
+                SizedBox.expand(
+                  child: InteractiveViewer(
+                    key: ValueKey(imageFiles[currentIndex].path),
+                    maxScale: 5.0,
+                    child: Image.file(imageFiles[currentIndex], fit: BoxFit.contain),
+                  ),
+                ),
+                Positioned(
+                  top: 8, right: 8,
+                  child: Container(
+                    decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                    child: IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                  ),
+                ),
+                if (currentIndex > 0)
+                  Positioned(
+                    left: 8, top: 0, bottom: 0,
+                    child: Center(
+                      child: Container(
+                        decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                        child: IconButton(
+                          iconSize: 32,
+                          icon: const Icon(Icons.chevron_left, color: Colors.white),
+                          onPressed: () => setDialogState(() => currentIndex--),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (currentIndex < imageFiles.length - 1)
+                  Positioned(
+                    right: 8, top: 0, bottom: 0,
+                    child: Center(
+                      child: Container(
+                        decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                        child: IconButton(
+                          iconSize: 32,
+                          icon: const Icon(Icons.chevron_right, color: Colors.white),
+                          onPressed: () => setDialogState(() => currentIndex++),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          );
+        }
+      ),
+    );
   }
 
   @override
@@ -381,10 +478,13 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
                   child: Center(
                     child: InkWell(
                       onTap: () => setState(() => isSelected ? _selectedPaths.remove(file.path) : _selectedPaths.add(file.path)),
+                      onDoubleTap: isVideo ? () {
+                        showDialog(context: context, builder: (_) => VideoPlayerDialog(videoFile: file));
+                      } : () => _showZoomDialog(file),
                       // Route rendering dynamically depending on file type signature
                       child: isVideo 
                           ? EmbeddedVideoThumbnail(videoFile: file)
-                          : Image.file(file, fit: BoxFit.contain, key: ValueKey("${file.path}_${file.lastModifiedSync()}")), 
+                          : Image.file(file, fit: BoxFit.contain, cacheWidth: 400, key: ValueKey("${file.path}_${file.lastModifiedSync()}")), 
                     ),
                   ),
                 ),
@@ -399,12 +499,12 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
                 if (isVideo) const Positioned(bottom: 8, right: 8, child: Icon(Icons.videocam, color: Colors.amberAccent, size: 20)),
               ],
             ),
-            Padding(padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 4), child: Text(p.basename(file.path), style: const TextStyle(fontSize: 9), overflow: TextOverflow.ellipsis)),
+            Padding(padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 4), child: Text(p.basename(file.path), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis)),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4),
               child: TextField(
                 controller: _controllers[file.path], 
-                style: const TextStyle(fontSize: 11),
+                style: const TextStyle(fontSize: 14),
                 decoration: const InputDecoration(isDense: true, hintText: "Rename...", contentPadding: EdgeInsets.symmetric(vertical: 6)),
                 onSubmitted: (v) => _renameFile(file, v),
               ),
@@ -417,8 +517,11 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
                   final stats = file.statSync();
                   showDialog(context: context, builder: (c) => AlertDialog(title: const Text("Info"), content: Text("Size: ${(stats.size / (1024 * 1024)).toStringAsFixed(2)} MB\nModified: ${stats.modified}"), actions: [TextButton(onPressed: ()=>Navigator.pop(c), child: const Text("Close"))]));
                 }),
-                if (isVideo) IconButton(icon: const Icon(Icons.play_arrow, size: 14, color: Colors.blue), onPressed: () => _openMedia(file.path)) else IconButton(icon: const Icon(Icons.open_in_new, size: 14, color: Colors.blue), onPressed: () => _openMedia(file.path)),
-                IconButton(icon: const Icon(Icons.delete_outline, size: 14, color: Colors.redAccent), onPressed: () { file.deleteSync(); _loadFiles(); }),
+              if (isVideo)
+                IconButton(icon: const Icon(Icons.play_arrow, size: 14, color: Colors.blue), onPressed: () => _openMedia(file.path))
+              else 
+                IconButton(icon: const Icon(Icons.open_in_new, size: 14, color: Colors.blue), onPressed: () => _openMedia(file.path)),
+              IconButton(icon: const Icon(Icons.delete_outline, size: 14, color: Colors.redAccent), onPressed: () { _moveToRecycleBin(file.path); _loadFiles(); }),
               ],
             )
           ],
@@ -495,6 +598,82 @@ class EmbeddedVideoThumbnail extends StatelessWidget {
   }
 }
 
+class VideoPlayerDialog extends StatefulWidget {
+  final File videoFile;
+  const VideoPlayerDialog({super.key, required this.videoFile});
+
+  @override
+  State<VideoPlayerDialog> createState() => _VideoPlayerDialogState();
+}
+
+class _VideoPlayerDialogState extends State<VideoPlayerDialog> {
+  late VideoPlayerController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = VideoPlayerController.file(widget.videoFile)
+      ..initialize().then((_) {
+        setState(() {}); // trigger rebuild to show the video
+        _controller.play(); // auto-play on open
+      });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.black,
+      insetPadding: const EdgeInsets.all(24),
+      child: Stack(
+        children: [
+          Center(
+            child: _controller.value.isInitialized
+                ? AspectRatio(
+                    aspectRatio: _controller.value.aspectRatio,
+                    child: VideoPlayer(_controller),
+                  )
+                : const CircularProgressIndicator(),
+          ),
+          Positioned(
+            top: 8, right: 8,
+            child: IconButton(
+              icon: const Icon(Icons.close, color: Colors.white, size: 32),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ),
+          if (_controller.value.isInitialized)
+            Positioned(
+              bottom: 16, left: 24, right: 24,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  VideoProgressIndicator(
+                    _controller,
+                    allowScrubbing: true,
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    colors: const VideoProgressColors(playedColor: Colors.blue),
+                  ),
+                  const SizedBox(height: 8),
+                  FloatingActionButton(
+                    backgroundColor: Colors.black54,
+                    onPressed: () => setState(() => _controller.value.isPlaying ? _controller.pause() : _controller.play()),
+                    child: Icon(_controller.value.isPlaying ? Icons.pause : Icons.play_arrow, color: Colors.white, size: 32),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class FullscreenSlideshowWidget extends StatefulWidget {
   final List<File> images;
   final int intervalSeconds;
@@ -549,10 +728,13 @@ class _FullscreenSlideshowWidgetState extends State<FullscreenSlideshowWidget> {
         child: Scaffold(
           backgroundColor: Colors.black,
           body: SizedBox.expand(
-            child: Image.file(
-              widget.images[_index],
-              fit: BoxFit.contain,
-              key: ValueKey(widget.images[_index].path),
+              child: InteractiveViewer(
+                maxScale: 5.0,
+                child: Image.file(
+                  widget.images[_index],
+                  fit: BoxFit.contain,
+                  key: ValueKey(widget.images[_index].path),
+                ),
             ),
           ),
         ),
