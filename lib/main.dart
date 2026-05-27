@@ -36,6 +36,8 @@ class ImageRenameScreen extends StatefulWidget {
 class _ImageRenameScreenState extends State<ImageRenameScreen> {
   List<File> _allFiles = [];
   int _currentIndex = 0;
+  int _preSearchIndex = 0;
+  String _lastSearchText = "";
   int _pageSize = 12; 
   String _sourcePath = "";
   String _targetPath = ""; 
@@ -43,6 +45,7 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
   final Set<String> _selectedPaths = {}; 
   final Set<String> _markedForSave = {}; 
   final Map<String, TextEditingController> _controllers = {};
+  final TextEditingController _searchController = TextEditingController();
   
   // Expanded to support common video extensions alongside images
   final List<String> _imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.bmp'];
@@ -54,6 +57,34 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
   void initState() {
     super.initState();
     _loadStoredPreferences();
+    _searchController.addListener(() {
+      if (mounted) {
+        String currentText = _searchController.text;
+        if (_lastSearchText == currentText) return;
+
+        setState(() {
+          if (_lastSearchText.isEmpty && currentText.isNotEmpty) {
+            _preSearchIndex = _currentIndex;
+            _currentIndex = 0;
+          } else if (currentText.isEmpty) {
+            _currentIndex = _preSearchIndex;
+            if (_currentIndex >= _allFiles.length) _currentIndex = 0;
+          } else {
+            _currentIndex = 0;
+          }
+          if (_scrollController.hasClients) _scrollController.jumpTo(0);
+        });
+        _lastSearchText = currentText;
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _controllers.forEach((_, controller) => controller.dispose());
+    _searchController.dispose();
+    _scrollController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadStoredPreferences() async {
@@ -147,10 +178,16 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
 
   Future<void> _processMarkedFiles() async {
     if (_targetPath.isEmpty) return;
+    int successCount = 0;
     for (String path in _markedForSave) {
-      File(path).copySync(p.join(_targetPath, p.basename(path)));
+      try {
+        File(path).copySync(p.join(_targetPath, p.basename(path)));
+        successCount++;
+      } catch (e) {
+        debugPrint("Failed to copy $path: $e");
+      }
     }
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Copied ${_markedForSave.length} items.")));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Copied $successCount items.")));
     setState(() => _markedForSave.clear());
   }
 
@@ -396,9 +433,69 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
     );
   }
 
+  void _showJumpToPageDialog(int currentPage, int totalPages) {
+    int targetPage = currentPage;
+    showDialog(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text("Jump to Page"),
+        content: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text("Page: "),
+            const SizedBox(width: 10),
+            SizedBox(
+              width: 80,
+              child: TextFormField(
+                initialValue: currentPage.toString(),
+                keyboardType: TextInputType.number,
+                autofocus: true,
+                onChanged: (v) => targetPage = int.tryParse(v) ?? currentPage,
+                onFieldSubmitted: (v) {
+                  Navigator.pop(c);
+                  _jumpToPage(targetPage, totalPages);
+                },
+              ),
+            ),
+            Text(" of $totalPages"),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c), child: const Text("Cancel")),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(c);
+              _jumpToPage(targetPage, totalPages);
+            },
+            child: const Text("Go"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _jumpToPage(int targetPage, int totalPages) {
+    if (targetPage < 1) targetPage = 1;
+    if (targetPage > totalPages) targetPage = totalPages;
+    setState(() {
+      _currentIndex = (targetPage - 1) * _pageSize;
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(0);
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
-    var displayed = _allFiles.skip(_currentIndex).take(_pageSize).toList();
+    final List<File> filteredFiles;
+    if (_searchController.text.trim().isEmpty) {
+      filteredFiles = _allFiles;
+    } else {
+      String query = _searchController.text.trim().toLowerCase();
+      filteredFiles = _allFiles.where((f) => p.basename(f.path).toLowerCase().contains(query)).toList();
+    }
+
+    var displayed = filteredFiles.skip(_currentIndex).take(_pageSize).toList();
     double cardWidth = (MediaQuery.of(context).size.width - 48) / 4;
 
     return Scaffold(
@@ -426,7 +523,7 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
                 children: displayed.map((file) => _buildMediaCard(file, cardWidth)).toList(),
               ),
             ),
-      bottomNavigationBar: _buildBottomBar(),
+      bottomNavigationBar: _buildBottomBar(filteredFiles),
     );
   }
 
@@ -442,14 +539,40 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
           Text(_editorPath.isEmpty ? "Default Player" : "Player: ${p.basename(_editorPath)}", style: const TextStyle(color: Colors.amber, fontSize: 11)),
           const SizedBox(width: 8),
           TextButton.icon(onPressed: _selectEditorApp, icon: const Icon(Icons.edit_note, size: 14), label: const Text("Set Player App", style: TextStyle(fontSize: 11))),
+          const SizedBox(width: 16),
+          Expanded(
+            child: SizedBox(
+              height: 36,
+              child: TextField(
+                controller: _searchController,
+                style: const TextStyle(fontSize: 12),
+                decoration: InputDecoration(
+                  hintText: "Search folder...",
+                  prefixIcon: const Icon(Icons.search, size: 16),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                  suffixIcon: _searchController.text.isNotEmpty
+                      ? IconButton(icon: const Icon(Icons.clear, size: 16), onPressed: () => _searchController.clear())
+                      : null,
+                ),
+              ),
+            ),
+          ),
           const Spacer(),
-          if (_markedForSave.isNotEmpty)
+          if (_markedForSave.isNotEmpty) ...[
+            TextButton.icon(
+              onPressed: () => setState(() => _markedForSave.clear()),
+              icon: const Icon(Icons.clear, size: 16, color: Colors.redAccent),
+              label: const Text("Clear Marked", style: TextStyle(color: Colors.redAccent)),
+            ),
+            const SizedBox(width: 8),
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(backgroundColor: Colors.cyan.shade900),
               onPressed: _processMarkedFiles,
               icon: const Icon(Icons.send_and_archive, size: 16),
               label: Text("Save Marked (${_markedForSave.length})"),
             ),
+          ],
         ],
       ),
     );
@@ -530,23 +653,31 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
     );
   }
 
-  Widget _buildBottomBar() {
+  Widget _buildBottomBar(List<File> sourceFiles) {
     if (_sourcePath.isEmpty) return const SizedBox.shrink();
 
     int currentPage = (_currentIndex / _pageSize).floor() + 1;
-    int totalPages = (_allFiles.length / _pageSize).ceil();
+    int totalPages = (sourceFiles.length / _pageSize).ceil();
     if (totalPages < 1) totalPages = 1; 
 
     return Container(
       padding: const EdgeInsets.all(8), color: Colors.black26,
       child: Row(
         children: [
-          Text("${_selectedPaths.length} sel / ${_allFiles.length} tot", style: const TextStyle(fontSize: 11)),
+          Text("${_selectedPaths.length} sel / ${sourceFiles.length} tot", style: const TextStyle(fontSize: 11)),
           const SizedBox(
             height: 16,
             child: VerticalDivider(width: 16, indent: 4, endIndent: 4),
           ),
-          Text("Page $currentPage of $totalPages", style: const TextStyle(fontSize: 11, color: Colors.grey)),
+          TextButton(
+            onPressed: () => _showJumpToPageDialog(currentPage, totalPages),
+            style: TextButton.styleFrom(
+              minimumSize: Size.zero,
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: Text("Page $currentPage of $totalPages", style: const TextStyle(fontSize: 11, decoration: TextDecoration.underline)),
+          ),
           const SizedBox(width: 12),
           const Text("View:", style: TextStyle(fontSize: 11)),
           const SizedBox(width: 4),
@@ -563,7 +694,7 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
           const Spacer(),
           ElevatedButton(onPressed: _currentIndex > 0 ? () => setState(() { _currentIndex -= _pageSize; _scrollController.jumpTo(0); }) : null, child: const Text("<")),
           const SizedBox(width: 4),
-          ElevatedButton(onPressed: _currentIndex + _pageSize < _allFiles.length ? () => setState(() { _currentIndex += _pageSize; _scrollController.jumpTo(0); }) : null, child: const Text(">")),
+          ElevatedButton(onPressed: _currentIndex + _pageSize < sourceFiles.length ? () => setState(() { _currentIndex += _pageSize; _scrollController.jumpTo(0); }) : null, child: const Text(">")),
           const SizedBox(width: 8),
           if (_selectedPaths.isNotEmpty)
             OutlinedButton(onPressed: _deleteBulk, child: const Text("Del Sel", style: TextStyle(color: Colors.redAccent, fontSize: 11))),
