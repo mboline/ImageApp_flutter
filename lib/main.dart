@@ -36,6 +36,18 @@ void moveToRecycleBin(String path) {
   }
 }
 
+void openContainingFolder(String filePath) {
+  if (Platform.isWindows) {
+    Process.run('explorer.exe', ['/select,', filePath]);
+  } else if (Platform.isMacOS) {
+    Process.run('open', ['-R', filePath]);
+  } else if (Platform.isLinux) {
+    Process.run('xdg-open', [p.dirname(filePath)]);
+  } else {
+    OpenFilex.open(p.dirname(filePath));
+  }
+}
+
 class ImageOrganizerApp extends StatelessWidget {
   const ImageOrganizerApp({super.key});
   @override
@@ -626,7 +638,14 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
                 if (isVideo) const Positioned(bottom: 8, right: 8, child: Icon(Icons.videocam, color: Colors.amberAccent, size: 20)),
               ],
             ),
-            Padding(padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 4), child: Text(p.basename(file.path), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis)),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 4), 
+              child: Tooltip(
+                message: file.path,
+                waitDuration: const Duration(milliseconds: 500),
+                child: Text(p.basename(file.path), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis),
+              ),
+            ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4),
               child: TextField(
@@ -644,6 +663,7 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
                   final stats = file.statSync();
                   showDialog(context: context, builder: (c) => AlertDialog(title: const Text("Info"), content: Text("Size: ${(stats.size / (1024 * 1024)).toStringAsFixed(2)} MB\nModified: ${stats.modified}"), actions: [TextButton(onPressed: ()=>Navigator.pop(c), child: const Text("Close"))]));
                 }),
+              IconButton(icon: const Icon(Icons.folder_open, size: 14, color: Colors.purpleAccent), tooltip: "Open Folder", onPressed: () => openContainingFolder(file.path)),
               if (isVideo)
                 IconButton(icon: const Icon(Icons.play_arrow, size: 14, color: Colors.blue), onPressed: () => _openMedia(file.path))
               else 
@@ -984,11 +1004,29 @@ class _DuplicateFinderScreenState extends State<DuplicateFinderScreen> {
                                           const SizedBox(height: 8),
                                           Padding(
                                             padding: const EdgeInsets.symmetric(horizontal: 4.0),
-                                            child: Text(p.basename(f.path), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold), maxLines: 1, overflow: TextOverflow.ellipsis),
+                                            child: Tooltip(
+                                              message: f.path,
+                                              waitDuration: const Duration(milliseconds: 500),
+                                              child: Text(p.basename(f.path), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold), maxLines: 1, overflow: TextOverflow.ellipsis),
+                                            ),
                                           ),
-                                          Padding(
-                                            padding: const EdgeInsets.symmetric(horizontal: 4.0, vertical: 2.0),
-                                            child: Text(p.relative(p.dirname(f.path), from: widget.sourcePath), style: const TextStyle(fontSize: 10, color: Colors.grey), maxLines: 2, overflow: TextOverflow.ellipsis),
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: Padding(
+                                              padding: const EdgeInsets.symmetric(horizontal: 4.0, vertical: 2.0),
+                                              child: Text(p.relative(p.dirname(f.path), from: widget.sourcePath), style: const TextStyle(fontSize: 10, color: Colors.grey), maxLines: 2, overflow: TextOverflow.ellipsis),
+                                            ),
+                                          ),
+                                          IconButton(
+                                            icon: const Icon(Icons.folder_open, size: 14, color: Colors.purpleAccent),
+                                            tooltip: "Open Folder",
+                                            padding: EdgeInsets.zero,
+                                            constraints: const BoxConstraints(),
+                                            onPressed: () => openContainingFolder(f.path),
+                                          ),
+                                          const SizedBox(width: 4),
+                                        ],
                                           ),
                                           const SizedBox(height: 8),
                                         ],
