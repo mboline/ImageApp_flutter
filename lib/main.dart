@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart'; 
 import 'package:path/path.dart' as p; 
 import 'package:file_picker/file_picker.dart'; 
@@ -14,6 +15,25 @@ void main() {
     WindowsVideoPlayer.registerWith();
   }
   runApp(const ImageOrganizerApp());
+}
+
+void moveToRecycleBin(String path) {
+  if (Platform.isWindows) {
+    Process.runSync(
+      'powershell',
+      [
+        '-command',
+        r'Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($env:FILE_PATH, "OnlyErrorDialogs", "SendToRecycleBin")'
+      ],
+      environment: {'FILE_PATH': path},
+    );
+  } else if (Platform.isMacOS) {
+    Process.runSync('osascript', ['-e', 'tell application "Finder" to delete POSIX file "$path"']);
+  } else if (Platform.isLinux) {
+    Process.runSync('gio', ['trash', path]);
+  } else {
+    File(path).deleteSync();
+  }
 }
 
 class ImageOrganizerApp extends StatelessWidget {
@@ -328,7 +348,7 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
         final f = File(path);
         if (f.existsSync()) {
           try {
-            _moveToRecycleBin(path);
+            moveToRecycleBin(path);
           } catch (e) {
             debugPrint("Failed to delete $path: $e");
           }
@@ -340,28 +360,6 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
         _markedForSave.clear();
       });
       _loadFiles();
-    }
-  }
-
-  void _moveToRecycleBin(String path) {
-    if (Platform.isWindows) {
-      Process.runSync(
-        'powershell',
-        [
-          '-command',
-          r'Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($env:FILE_PATH, "OnlyErrorDialogs", "SendToRecycleBin")'
-        ],
-        // Passing the path as an environment variable prevents issues with spaces or quotes in file names
-        environment: {'FILE_PATH': path},
-      );
-    } else if (Platform.isMacOS) {
-      // Uses macOS AppleScript to ask Finder to send the file to the Trash
-      Process.runSync('osascript', ['-e', 'tell application "Finder" to delete POSIX file "$path"']);
-    } else if (Platform.isLinux) {
-      // Uses the standard GNOME/Linux gio command to move the file to the Trash
-      Process.runSync('gio', ['trash', path]);
-    } else {
-      File(path).deleteSync();
     }
   }
 
@@ -509,6 +507,12 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
               onPressed: _startSlideshow,
               tooltip: "Play Image Slideshow",
             ),
+          if (_sourcePath.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.control_point_duplicate, color: Colors.orangeAccent),
+              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => DuplicateFinderScreen(sourcePath: _sourcePath))),
+              tooltip: "Find Exact Duplicates",
+            ),
           IconButton(icon: const Icon(Icons.folder_open), onPressed: _selectSourceDirectory, tooltip: "Select Source Folder"),
           IconButton(icon: const Icon(Icons.refresh), onPressed: _loadFiles, tooltip: "Refresh Grid"),
         ],
@@ -644,7 +648,7 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
                 IconButton(icon: const Icon(Icons.play_arrow, size: 14, color: Colors.blue), onPressed: () => _openMedia(file.path))
               else 
                 IconButton(icon: const Icon(Icons.open_in_new, size: 14, color: Colors.blue), onPressed: () => _openMedia(file.path)),
-              IconButton(icon: const Icon(Icons.delete_outline, size: 14, color: Colors.redAccent), onPressed: () { _moveToRecycleBin(file.path); _loadFiles(); }),
+              IconButton(icon: const Icon(Icons.delete_outline, size: 14, color: Colors.redAccent), onPressed: () { moveToRecycleBin(file.path); _loadFiles(); }),
               ],
             )
           ],
@@ -701,6 +705,304 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
           const SizedBox(width: 8),
           OutlinedButton(onPressed: _allFiles.isNotEmpty ? _showBatchRenameDialog : null, child: const Text("Batch Rename", style: TextStyle(fontSize: 11))),
         ],
+      ),
+    );
+  }
+}
+
+class DuplicateFinderScreen extends StatefulWidget {
+  final String sourcePath;
+  const DuplicateFinderScreen({super.key, required this.sourcePath});
+
+  @override
+  State<DuplicateFinderScreen> createState() => _DuplicateFinderScreenState();
+}
+
+class _DuplicateFinderScreenState extends State<DuplicateFinderScreen> {
+  bool _isScanning = true;
+  List<List<File>> _duplicates = [];
+  final List<String> _imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.bmp'];
+  final List<String> _videoExtensions = ['.mp4', '.mov', '.avi', '.mkv'];
+  final Set<String> _selectedDuplicates = {};
+  int? _lastGroupIndex;
+  int? _lastFileIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    _scanForDuplicates();
+  }
+
+  Future<void> _scanForDuplicates() async {
+    setState(() => _isScanning = true);
+    
+    final dir = Directory(widget.sourcePath);
+    final exts = [..._imageExtensions, ..._videoExtensions];
+    List<File> allFiles = [];
+    
+    try {
+      await for (var entity in dir.list(recursive: true, followLinks: false)) {
+        if (entity is File && exts.contains(p.extension(entity.path).toLowerCase())) {
+          allFiles.add(entity);
+        }
+      }
+    } catch (e) {
+      debugPrint("Directory scan error: $e");
+    }
+
+    Map<int, List<File>> sizeMap = {};
+    for (var f in allFiles) {
+      try {
+        int size = await f.length();
+        if (size > 0) sizeMap.putIfAbsent(size, () => []).add(f);
+      } catch (_) {}
+    }
+
+    List<List<File>> duplicates = [];
+    
+    for (var entry in sizeMap.entries) {
+      if (entry.value.length > 1) {
+        List<File> group = entry.value;
+        List<bool> matched = List.filled(group.length, false);
+        
+        for (int i = 0; i < group.length; i++) {
+          if (matched[i]) continue;
+          List<File> currentMatch = [group[i]];
+          
+          for (int j = i + 1; j < group.length; j++) {
+            if (matched[j]) continue;
+            // Avoid freezing UI by checking asynchronously
+            if (await _areFilesIdentical(group[i], group[j])) {
+              currentMatch.add(group[j]);
+              matched[j] = true;
+            }
+          }
+          if (currentMatch.length > 1) duplicates.add(currentMatch);
+        }
+      }
+    }
+    
+    if (mounted) {
+      setState(() {
+        _duplicates = duplicates;
+        _isScanning = false;
+      });
+    }
+  }
+
+  Future<bool> _areFilesIdentical(File f1, File f2) async {
+    const chunkSize = 1024 * 1024; // Compare files via 1MB memory chunks
+    RandomAccessFile? raf1;
+    RandomAccessFile? raf2;
+    try {
+      raf1 = await f1.open(mode: FileMode.read);
+      raf2 = await f2.open(mode: FileMode.read);
+      while (true) {
+        final b1 = await raf1.read(chunkSize);
+        final b2 = await raf2.read(chunkSize);
+        if (b1.length != b2.length) return false;
+        if (b1.isEmpty) break; // EOF
+        if (!listEquals(b1, b2)) return false;
+      }
+      return true;
+    } catch (e) {
+      return false;
+    } finally {
+      await raf1?.close();
+      await raf2?.close();
+    }
+  }
+
+  void _handleTap(int groupIndex, int fileIndex) {
+    bool isShift = HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftLeft) || 
+                   HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftRight);
+    
+    // Fallback for older Flutter versions or edge cases where HardwareKeyboard misses the modifier
+    // ignore: deprecated_member_use
+    if (!isShift) {
+      // ignore: deprecated_member_use
+      isShift = RawKeyboard.instance.keysPressed.contains(LogicalKeyboardKey.shiftLeft) || 
+                // ignore: deprecated_member_use
+                RawKeyboard.instance.keysPressed.contains(LogicalKeyboardKey.shiftRight);
+    }
+    
+    setState(() {
+      if (isShift && _lastGroupIndex != null && _lastFileIndex != null) {
+        int startGroup = _lastGroupIndex! < groupIndex ? _lastGroupIndex! : groupIndex;
+        int endGroup = _lastGroupIndex! > groupIndex ? _lastGroupIndex! : groupIndex;
+        
+        int startCol = _lastFileIndex! < fileIndex ? _lastFileIndex! : fileIndex;
+        int endCol = _lastFileIndex! > fileIndex ? _lastFileIndex! : fileIndex;
+        
+        String lastPath = _duplicates[_lastGroupIndex!][_lastFileIndex!].path;
+        bool isSelecting = _selectedDuplicates.contains(lastPath);
+        
+        for (int g = startGroup; g <= endGroup; g++) {
+          for (int c = startCol; c <= endCol; c++) {
+            if (c < _duplicates[g].length) {
+              String path = _duplicates[g][c].path;
+              if (isSelecting) {
+                _selectedDuplicates.add(path);
+              } else {
+                _selectedDuplicates.remove(path);
+              }
+            }
+          }
+        }
+      } else {
+        // Normal click acts as a toggle (Ctrl not needed)
+        String path = _duplicates[groupIndex][fileIndex].path;
+        if (_selectedDuplicates.contains(path)) {
+          _selectedDuplicates.remove(path);
+        } else {
+          _selectedDuplicates.add(path);
+        }
+      }
+      _lastGroupIndex = groupIndex;
+      _lastFileIndex = fileIndex;
+    });
+  }
+
+  void _autoSelectAllButOne() {
+    setState(() {
+      _selectedDuplicates.clear();
+      for (var group in _duplicates) {
+        for (int i = 1; i < group.length; i++) {
+          _selectedDuplicates.add(group[i].path);
+        }
+      }
+      _lastGroupIndex = null;
+      _lastFileIndex = null;
+    });
+  }
+
+  void _deleteSelected() {
+    if (_selectedDuplicates.isEmpty) return;
+    final pathsToDelete = List<String>.from(_selectedDuplicates);
+    int deletedCount = 0;
+    for (var path in pathsToDelete) {
+      try {
+        moveToRecycleBin(path);
+        deletedCount++;
+      } catch (e) {
+        debugPrint("Delete failed for $path: $e");
+      }
+    }
+    setState(() {
+      for (int i = _duplicates.length - 1; i >= 0; i--) {
+        _duplicates[i].removeWhere((f) => pathsToDelete.contains(f.path));
+        if (_duplicates[i].length < 2) {
+          _duplicates.removeAt(i);
+        }
+      }
+      _selectedDuplicates.clear();
+      _lastGroupIndex = null;
+      _lastFileIndex = null;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Deleted $deletedCount items.")));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Exact File Duplicates"),
+        actions: [
+          if (!_isScanning && _duplicates.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.library_add_check, color: Colors.cyan),
+              tooltip: "Auto-select all but one in each group",
+              onPressed: _autoSelectAllButOne,
+            ),
+          if (_selectedDuplicates.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(right: 16.0),
+              child: TextButton.icon(
+                onPressed: _deleteSelected,
+                icon: const Icon(Icons.delete, color: Colors.redAccent),
+                label: Text("Delete Selected (${_selectedDuplicates.length})", style: const TextStyle(color: Colors.redAccent)),
+              ),
+            )
+        ],
+      ),
+      body: Focus(
+        autofocus: true,
+        child: _isScanning
+            ? const Center(child: Column(mainAxisSize: MainAxisSize.min, children: [CircularProgressIndicator(), SizedBox(height: 16), Text("Scanning subfolders block-by-block for duplicates...")]))
+            : _duplicates.isEmpty
+                ? const Center(child: Text("Awesome! No duplicate files found."))
+                : ListView.builder(
+                    itemCount: _duplicates.length,
+                    padding: const EdgeInsets.all(8.0),
+                    itemBuilder: (context, index) {
+                      final group = _duplicates[index];
+                      return Card(
+                        margin: const EdgeInsets.symmetric(vertical: 8.0),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text("Found ${group.length} exact matches", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.cyan)),
+                              const SizedBox(height: 12),
+                              SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: group.asMap().entries.map((entry) {
+                                    File f = entry.value;
+                                    bool isVideo = _videoExtensions.contains(p.extension(f.path).toLowerCase());
+                                    bool isSelected = _selectedDuplicates.contains(f.path);
+                                    return Container(
+                                      width: 160, margin: const EdgeInsets.only(right: 16),
+                                      decoration: isSelected 
+                                          ? BoxDecoration(color: Colors.blueGrey.shade800, border: Border.all(color: Colors.blue, width: 2), borderRadius: BorderRadius.circular(4)) 
+                                          : null,
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Stack(
+                                            children: [
+                                              Container(
+                                                height: 120, width: 160, color: Colors.black26,
+                                                child: InkWell(
+                                                  onTap: () => _handleTap(index, entry.key),
+                                                  child: isVideo ? EmbeddedVideoThumbnail(videoFile: f) : Image.file(f, fit: BoxFit.cover, cacheWidth: 200),
+                                                ),
+                                              ),
+                                              Positioned(
+                                                top: 0, left: 0,
+                                                child: Checkbox(
+                                                  value: isSelected,
+                                                  activeColor: Colors.cyan,
+                                                  onChanged: (val) => _handleTap(index, entry.key),
+                                                ),
+                                              ),
+                                              if (isSelected) const Positioned(top: 8, right: 8, child: Icon(Icons.check_circle, color: Colors.blue, size: 20)),
+                                            ],
+                                          ),
+                                          const SizedBox(height: 8),
+                                          Padding(
+                                            padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                                            child: Text(p.basename(f.path), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold), maxLines: 1, overflow: TextOverflow.ellipsis),
+                                          ),
+                                          Padding(
+                                            padding: const EdgeInsets.symmetric(horizontal: 4.0, vertical: 2.0),
+                                            child: Text(p.relative(p.dirname(f.path), from: widget.sourcePath), style: const TextStyle(fontSize: 10, color: Colors.grey), maxLines: 2, overflow: TextOverflow.ellipsis),
+                                          ),
+                                          const SizedBox(height: 8),
+                                        ],
+                                      ),
+                                    );
+                                  }).toList(),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
       ),
     );
   }
