@@ -213,7 +213,20 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
     int successCount = 0;
     for (String path in _markedForSave) {
       try {
-        File(path).copySync(p.join(_targetPath, p.basename(path)));
+        String fileName = p.basename(path);
+        String destPath = p.join(_targetPath, fileName);
+        
+        if (File(destPath).existsSync()) {
+          String baseName = p.basenameWithoutExtension(fileName);
+          String ext = p.extension(fileName);
+          int counter = 1;
+          while (File(destPath).existsSync()) {
+            destPath = p.join(_targetPath, "$baseName ($counter)$ext");
+            counter++;
+          }
+        }
+        
+        File(path).copySync(destPath);
         successCount++;
       } catch (e) {
         debugPrint("Failed to copy $path: $e");
@@ -226,6 +239,16 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
   void _renameFile(File file, String newName) {
     if (newName.isEmpty) return;
     String newPath = p.join(p.dirname(file.path), "$newName${p.extension(file.path)}");
+    if (file.path == newPath) return;
+
+    bool isCaseChange = (Platform.isWindows || Platform.isMacOS) && 
+                        file.path.toLowerCase() == newPath.toLowerCase();
+    
+    if (!isCaseChange && File(newPath).existsSync()) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("A file named '$newName' already exists.")));
+      return;
+    }
+
     try {
       File newFile = file.renameSync(newPath);
       setState(() {
@@ -344,7 +367,19 @@ class _ImageRenameScreenState extends State<ImageRenameScreen> {
               ? _allFiles.where((f) => _selectedPaths.contains(f.path)).toList() 
               : _allFiles.skip(_currentIndex).take(_pageSize).toList();
           for (int i = 0; i < targets.length; i++) {
-            targets[i].renameSync(p.join(p.dirname(targets[i].path), "$prefix${nextNum + i}${p.extension(targets[i].path)}"));
+            String newPath = p.join(p.dirname(targets[i].path), "$prefix$nextNum${p.extension(targets[i].path)}");
+            bool isCaseChange = (Platform.isWindows || Platform.isMacOS) && targets[i].path.toLowerCase() == newPath.toLowerCase();
+            while (!isCaseChange && File(newPath).existsSync()) {
+              nextNum++;
+              newPath = p.join(p.dirname(targets[i].path), "$prefix$nextNum${p.extension(targets[i].path)}");
+              isCaseChange = (Platform.isWindows || Platform.isMacOS) && targets[i].path.toLowerCase() == newPath.toLowerCase();
+            }
+            try {
+              targets[i].renameSync(newPath);
+            } catch (e) {
+              debugPrint("Batch rename failed: $e");
+            }
+            nextNum++;
           }
           _selectedPaths.clear(); _loadFiles(); Navigator.pop(c);
         }, child: const Text("Rename"))
@@ -926,7 +961,7 @@ class _DuplicateFinderScreenState extends State<DuplicateFinderScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Exact File Duplicates"),
+        title: Text(_isScanning ? "Exact File Duplicates" : "Exact File Duplicates (${_duplicates.length})"),
         actions: [
           if (!_isScanning && _duplicates.isNotEmpty)
             IconButton(
